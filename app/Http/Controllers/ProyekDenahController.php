@@ -5,10 +5,13 @@ namespace App\Http\Controllers;
 use App\Models\ProyekDenah;
 use App\Models\TitikLampu;
 use App\Models\KatalogLampu;
-use App\Notifications\DenahRevisi;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Storage;
 use Symfony\Component\Process\Process;
+use App\Models\User;
+use App\Notifications\StatusUpdate;
+use Illuminate\Support\Facades\Notification;
+use Illuminate\Support\Str;
 
 class ProyekDenahController extends Controller
 {
@@ -26,8 +29,10 @@ class ProyekDenahController extends Controller
         $default = $user->isAdmin() ? ProyekDenah::STATUS_DIKIRIM : 'semua';
 
         $status = $request->query('status');
-        if (! is_string($status)
-            || ($status !== 'semua' && ! array_key_exists($status, ProyekDenah::STATUS_LABEL))) {
+        if (
+            !is_string($status)
+            || ($status !== 'semua' && !array_key_exists($status, ProyekDenah::STATUS_LABEL))
+        ) {
             $status = $default;
         }
 
@@ -42,7 +47,7 @@ class ProyekDenahController extends Controller
         $proyek = $query->paginate(10)->withQueryString();
 
         $hitung = ProyekDenah::query()
-            ->when($user->isDrafter(), fn ($q) => $q->where('user_id', $user->id))
+            ->when($user->isDrafter(), fn($q) => $q->where('user_id', $user->id))
             ->selectRaw('status, count(*) as total')
             ->groupBy('status')
             ->pluck('total', 'status');
@@ -113,7 +118,7 @@ class ProyekDenahController extends Controller
         if ($user->isDrafter()) {
             $this->pastikanPemilik($proyekDenah);
 
-            if (! $proyekDenah->bisaDihapusDrafter()) {
+            if (!$proyekDenah->bisaDihapusDrafter()) {
                 return back()->with('error', 'Denah yang sudah dikirim ke Admin tidak bisa dihapus.');
             }
         }
@@ -133,7 +138,7 @@ class ProyekDenahController extends Controller
      */
     public function process(ProyekDenah $proyekDenah)
     {
-        if (! $proyekDenah->bisaDihitung()) {
+        if (!$proyekDenah->bisaDihitung()) {
             return back()->with('error', 'Titik lampu baru bisa dihitung setelah denah dikirim Drafter.');
         }
 
@@ -154,7 +159,7 @@ class ProyekDenahController extends Controller
     {
         $this->pastikanPemilik($proyekDenah);
 
-        if (! $proyekDenah->bisaDikirim()) {
+        if (!$proyekDenah->bisaDikirim()) {
             return back()->with('error', 'Denah ini tidak bisa dikirim pada status sekarang.');
         }
 
@@ -162,6 +167,8 @@ class ProyekDenahController extends Controller
             'status' => ProyekDenah::STATUS_DIKIRIM,
             'diajukan_at' => now(),
         ]);
+
+        $this->notifikasiKeAdmin($proyekDenah, 'Denah baru masuk');
 
         return redirect()->route('proyek-denah.show', $proyekDenah->id)
             ->with('success', 'Denah berhasil dikirim ke Admin.');
@@ -174,7 +181,7 @@ class ProyekDenahController extends Controller
      */
     public function mintaRevisi(Request $request, ProyekDenah $proyekDenah)
     {
-        if (! $proyekDenah->bisaMintaRevisi()) {
+        if (!$proyekDenah->bisaMintaRevisi()) {
             return back()->with('error', 'Upload ulang tidak bisa diminta pada status denah sekarang.');
         }
 
@@ -189,9 +196,14 @@ class ProyekDenahController extends Controller
             'catatan_review' => $validated['catatan_review'],
         ]);
 
-        $proyekDenah->user?->notify(
-            new DenahRevisi($proyekDenah, $validated['catatan_review'])
-        );
+        $proyekDenah->user?->notify(new StatusUpdate(
+            judul: 'Denah perlu diunggah ulang',
+            pesan: $proyekDenah->nama_proyek . ': ' . Str::limit($validated['catatan_review'], 70),
+            url: route('proyek-denah.show', $proyekDenah->id),
+            ikon: 'fa-redo',
+            warna: 'warning',
+            proyekDenahId: $proyekDenah->id,
+        ));
 
         return redirect()->route('proyek-denah.show', $proyekDenah->id)
             ->with('success', 'Permintaan upload ulang sudah dikirim ke Drafter.');
@@ -208,7 +220,7 @@ class ProyekDenahController extends Controller
     {
         $this->pastikanPemilik($proyekDenah);
 
-        if (! $proyekDenah->bisaUploadUlang()) {
+        if (!$proyekDenah->bisaUploadUlang()) {
             return back()->with('error', 'File denah tidak bisa diganti pada status ini.');
         }
 
@@ -245,9 +257,12 @@ class ProyekDenahController extends Controller
             Storage::disk('public')->delete($pathLama);
         }
 
+        if ($sudahDikirim) {
+            $this->notifikasiKeAdmin($proyekDenah, 'Denah revisi diunggah ulang');
+        }
         // Permintaan upload ulang sudah dipenuhi: tandai notifikasinya terbaca.
         auth()->user()->unreadNotifications
-            ->filter(fn ($notif) => ($notif->data['proyek_denah_id'] ?? null) === $proyekDenah->id)
+            ->filter(fn($notif) => ($notif->data['proyek_denah_id'] ?? null) === $proyekDenah->id)
             ->each->markAsRead();
 
         return redirect()->route('proyek-denah.show', $proyekDenah->id)
@@ -264,6 +279,19 @@ class ProyekDenahController extends Controller
         }
     }
 
+    private function notifikasiKeAdmin(ProyekDenah $proyekDenah, string $judul): void
+    {
+        $admin = User::where('role', User::ROLE_ADMIN)->get();
+
+        Notification::send($admin, new StatusUpdate(
+            judul: $judul,
+            pesan: $proyekDenah->nama_proyek . ' dari ' . (auth()->user()->name ?? 'Drafter'),
+            url: route('proyek-denah.show', $proyekDenah->id),
+            ikon: 'fa-file-upload',
+            warna: 'info',
+            proyekDenahId: $proyekDenah->id,
+        ));
+    }
     private function pastikanPemilik(ProyekDenah $proyekDenah): void
     {
         abort_unless(

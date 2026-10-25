@@ -12,6 +12,11 @@ class NotifikasiController extends Controller
         $notif = auth()->user()->notifications()->findOrFail($id);
         $notif->markAsRead();
 
+        $url = $notif->data['url'] ?? null;
+        if ($url) {
+            return redirect($url);
+        }
+
         $denahId = $notif->data['proyek_denah_id'] ?? null;
 
         if ($denahId && ProyekDenah::whereKey($denahId)->exists()) {

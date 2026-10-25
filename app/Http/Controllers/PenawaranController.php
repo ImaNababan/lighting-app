@@ -5,7 +5,9 @@ namespace App\Http\Controllers;
 use App\Helpers\Terbilang;
 use App\Models\KatalogLampu;
 use App\Models\Penawaran;
-use App\Models\ProyekDenah;
+use App\Models\User;
+use App\Notifications\StatusUpdate;
+use Illuminate\Support\Facades\Notification;
 use Illuminate\Http\Request;
 use Illuminate\Validation\Rule;
 
@@ -16,14 +18,33 @@ class PenawaranController extends Controller
      * (IL/SP-GBL/{tahun}/{bulan romawi}/{nomor urut}).
      */
     private const ROMAWI_BULAN = [
-        1 => 'I', 2 => 'II', 3 => 'III', 4 => 'IV', 5 => 'V', 6 => 'VI',
-        7 => 'VII', 8 => 'VIII', 9 => 'IX', 10 => 'X', 11 => 'XI', 12 => 'XII',
+        1 => 'I',
+        2 => 'II',
+        3 => 'III',
+        4 => 'IV',
+        5 => 'V',
+        6 => 'VI',
+        7 => 'VII',
+        8 => 'VIII',
+        9 => 'IX',
+        10 => 'X',
+        11 => 'XI',
+        12 => 'XII',
     ];
 
     private const NAMA_BULAN = [
-        1 => 'Januari', 2 => 'Februari', 3 => 'Maret', 4 => 'April',
-        5 => 'Mei', 6 => 'Juni', 7 => 'Juli', 8 => 'Agustus',
-        9 => 'September', 10 => 'Oktober', 11 => 'November', 12 => 'Desember',
+        1 => 'Januari',
+        2 => 'Februari',
+        3 => 'Maret',
+        4 => 'April',
+        5 => 'Mei',
+        6 => 'Juni',
+        7 => 'Juli',
+        8 => 'Agustus',
+        9 => 'September',
+        10 => 'Oktober',
+        11 => 'November',
+        12 => 'Desember',
     ];
 
     /**
@@ -37,9 +58,11 @@ class PenawaranController extends Controller
         $default = $user->isManajer() ? Penawaran::STATUS_DIAJUKAN : 'semua';
 
         $status = $request->query('status');
-        if (! is_string($status)
-            || ($status !== 'semua' && ! array_key_exists($status, Penawaran::STATUS_LABEL))
-            || ($user->isManajer() && $status === Penawaran::STATUS_DRAFT)) {
+        if (
+            !is_string($status)
+            || ($status !== 'semua' && !array_key_exists($status, Penawaran::STATUS_LABEL))
+            || ($user->isManajer() && $status === Penawaran::STATUS_DRAFT)
+        ) {
             $status = $default;
         }
 
@@ -54,7 +77,7 @@ class PenawaranController extends Controller
         $penawaran = $query->paginate(10)->withQueryString();
 
         $jumlah = Penawaran::query()
-            ->when($user->isManajer(), fn ($q) => $q->where('status', '!=', Penawaran::STATUS_DRAFT))
+            ->when($user->isManajer(), fn($q) => $q->where('status', '!=', Penawaran::STATUS_DRAFT))
             ->selectRaw('status, count(*) as total')
             ->groupBy('status')
             ->pluck('total', 'status');
@@ -155,7 +178,7 @@ class PenawaranController extends Controller
      */
     public function edit(Penawaran $penawaran)
     {
-        if (! $penawaran->bisaDiedit()) {
+        if (!$penawaran->bisaDiedit()) {
             return redirect()->route('penawaran.show', $penawaran->id)
                 ->with('error', 'Penawaran yang sedang direview atau sudah disetujui tidak bisa diedit.');
         }
@@ -187,7 +210,7 @@ class PenawaranController extends Controller
 
     public function update(Request $request, Penawaran $penawaran)
     {
-        if (! $penawaran->bisaDiedit()) {
+        if (!$penawaran->bisaDiedit()) {
             return redirect()->route('penawaran.show', $penawaran->id)
                 ->with('error', 'Penawaran yang sedang direview atau sudah disetujui tidak bisa diedit.');
         }
@@ -218,7 +241,7 @@ class PenawaranController extends Controller
      */
     public function ajukan(Penawaran $penawaran)
     {
-        if (! $penawaran->bisaDiajukan()) {
+        if (!$penawaran->bisaDiajukan()) {
             return back()->with('error', 'Penawaran ini tidak bisa dikirim pada status sekarang.');
         }
 
@@ -230,6 +253,14 @@ class PenawaranController extends Controller
             'catatan_review' => null,
         ]);
 
+        $this->kirimNotifikasi(
+            User::where('role', User::ROLE_MANAJER)->get(),
+            $penawaran,
+            'Penawaran menunggu review',
+            'fa-file-signature',
+            'primary',
+        );
+
         return redirect()->route('penawaran.show', $penawaran->id)
             ->with('success', 'Penawaran berhasil dikirim ke Manajer.');
     }
@@ -239,7 +270,7 @@ class PenawaranController extends Controller
      */
     public function approve(Request $request, Penawaran $penawaran)
     {
-        if (! $penawaran->bisaDireview()) {
+        if (!$penawaran->bisaDireview()) {
             return back()->with('error', 'Hanya penawaran yang menunggu review yang bisa disetujui.');
         }
 
@@ -254,6 +285,14 @@ class PenawaranController extends Controller
             'catatan_review' => $validated['catatan_review'] ?? null,
         ]);
 
+        $this->kirimNotifikasi(
+            User::where('role', User::ROLE_ADMIN)->get(),
+            $penawaran,
+            'Penawaran disetujui',
+            'fa-check-circle',
+            'success',
+        );
+
         return redirect()->route('penawaran.show', $penawaran->id)
             ->with('success', 'Penawaran disetujui.');
     }
@@ -263,7 +302,7 @@ class PenawaranController extends Controller
      */
     public function reject(Request $request, Penawaran $penawaran)
     {
-        if (! $penawaran->bisaDireview()) {
+        if (!$penawaran->bisaDireview()) {
             return back()->with('error', 'Hanya penawaran yang menunggu review yang bisa ditolak.');
         }
 
@@ -278,10 +317,31 @@ class PenawaranController extends Controller
             'catatan_review' => $validated['catatan_review'],
         ]);
 
+        $this->kirimNotifikasi(
+            User::where('role', User::ROLE_ADMIN)->get(),
+            $penawaran,
+            'Penawaran ditolak, perlu revisi',
+            'fa-times-circle',
+            'danger',
+        );
+
         return redirect()->route('penawaran.show', $penawaran->id)
             ->with('success', 'Penawaran ditolak dan dikembalikan ke Admin.');
     }
 
+    private function kirimNotifikasi($penerima, Penawaran $penawaran, string $judul, string $ikon, string $warna): void
+    {
+        $penawaran->loadMissing('proyekDenah');
+
+        Notification::send($penerima, new StatusUpdate(
+            judul: $judul,
+            pesan: ($penawaran->nomor_penawaran ?? 'Penawaran') . ' - ' . ($penawaran->proyekDenah->nama_proyek ?? ''),
+            url: route('penawaran.show', $penawaran->id),
+            ikon: $ikon,
+            warna: $warna,
+            proyekDenahId: $penawaran->proyek_denah_id,
+        ));
+    }
     public function destroy(Penawaran $penawaran)
     {
         $penawaran->delete();
@@ -307,7 +367,9 @@ class PenawaranController extends Controller
     {
         return [
             'nomor_penawaran' => [
-                'required', 'string', 'max:100',
+                'required',
+                'string',
+                'max:100',
                 Rule::unique('penawaran', 'nomor_penawaran')->ignore($ignoreId),
             ],
             'tanggal_penawaran' => 'required|date',
